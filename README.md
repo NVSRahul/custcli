@@ -63,7 +63,7 @@ custcli run --cwd "/path/to/project" "implement the requested change"
 Live TUI:
 
 ```bash
-custcli live --cwd "/path/to/project" --planner-model auto
+custcli live --new-session --planner-model auto
 ```
 
 List live sessions:
