@@ -1,5 +1,8 @@
 # custcli
 
+[![CI](https://github.com/NVSRahul/custcli/actions/workflows/ci.yml/badge.svg)](https://github.com/NVSRahul/custcli/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 `custcli` is a local orchestration CLI for paired coding workflows.
 
 - `gemini` handles planning and review
