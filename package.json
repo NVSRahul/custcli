@@ -1,0 +1,37 @@
+{
+  "name": "custcli",
+  "version": "0.1.0",
+  "description": "A paired-agent CLI that uses Gemini for planning/review and OpenCode for execution.",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NVSRahul/custcli.git"
+  },
+  "homepage": "https://github.com/NVSRahul/custcli",
+  "bugs": {
+    "url": "https://github.com/NVSRahul/custcli/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "HELP.md"
+  ],
+  "keywords": [
+    "cli",
+    "gemini",
+    "opencode",
+    "agents",
+    "automation"
+  ],
+  "bin": {
+    "custcli": "./bin/custcli.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "start": "node ./bin/custcli.js"
+  }
+}
