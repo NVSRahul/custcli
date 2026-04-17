@@ -78,6 +78,11 @@ Prune old heavy artifacts:
 custcli prune --keep-last 20
 ```
 
+## Screenshots
+
+- [Gemini running state](./screenshots/running.png)
+- [Gemini completed state](./screenshots/done.png)
+
 ## Platform Notes
 
 `custcli` is written in Node.js and uses direct process spawning plus Node path handling. It is designed to work on macOS, Linux, and Windows.
