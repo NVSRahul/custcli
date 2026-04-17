@@ -90,3 +90,5 @@ Practical notes:
 The full manual is in [HELP.md](./HELP.md).
 
 Repository: [github.com/NVSRahul/custcli](https://github.com/NVSRahul/custcli)
+
+License: [MIT](./LICENSE)

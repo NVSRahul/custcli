@@ -11,6 +11,7 @@
   "bugs": {
     "url": "https://github.com/NVSRahul/custcli/issues"
   },
+  "license": "MIT",
   "engines": {
     "node": ">=20"
   },

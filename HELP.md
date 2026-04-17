@@ -501,3 +501,4 @@ Before publishing to npm, you should still decide:
 Repository:
 
 - [github.com/NVSRahul/custcli](https://github.com/NVSRahul/custcli)
+- [LICENSE](./LICENSE)
