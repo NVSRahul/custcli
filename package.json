@@ -32,7 +32,7 @@
     "custcli": "./bin/custcli.js"
   },
   "scripts": {
-    "test": "node --test test/*.test.js",
+    "test": "node ./scripts/run-tests.mjs",
     "start": "node ./bin/custcli.js"
   }
 }
