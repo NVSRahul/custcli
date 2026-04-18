@@ -6,7 +6,7 @@ const prompt = promptIndex >= 0 ? args[promptIndex + 1] : ""
 
 const isReviewPrompt = /You are reviewing work performed by OpenCode/i.test(prompt)
 const isCorrectionPlan = /This is correction planning pass 2\./i.test(prompt)
-const isSecondReview = /This is review pass 2 after follow-up changes\./i.test(prompt)
+const isSecondReview = /Review pass 2\./i.test(prompt)
 
 let response
 if (isReviewPrompt) {
@@ -14,7 +14,18 @@ if (isReviewPrompt) {
     ? {
         verdict: "approved",
         summary: "Follow-up review approved the corrected implementation.",
-        findings: ["Prior reviewer concerns were addressed."],
+        findings: [
+          {
+            id: "finding-1",
+            severity: "low",
+            summary: "Prior reviewer concerns were addressed.",
+            details: "The scoped correction resolved the earlier contradiction.",
+            contradictionTarget: "step-1",
+            evidence: "Follow-up correction was applied.",
+            replanScope: [],
+            verificationTarget: "Reviewer approves the corrected pass.",
+          },
+        ],
         risks: [],
         follow_up_steps: [],
         tests: ["Reviewed the second execution pass."],
@@ -22,7 +33,18 @@ if (isReviewPrompt) {
     : {
         verdict: "changes_requested",
         summary: "Initial review found a contradiction that needs a corrected plan.",
-        findings: ["The first execution pass needs a follow-up correction."],
+        findings: [
+          {
+            id: "finding-1",
+            severity: "high",
+            summary: "The first execution pass needs a follow-up correction.",
+            details: "The first pass does not satisfy the reviewer contradiction requirements.",
+            contradictionTarget: "step-1",
+            evidence: "Initial implementation did not satisfy the reviewer expectations.",
+            replanScope: ["step-1"],
+            verificationTarget: "Reviewer approves the corrected pass.",
+          },
+        ],
         risks: ["The current implementation may not satisfy the request fully."],
         follow_up_steps: ["Re-plan using the reviewer contradiction and execute one more pass."],
         tests: ["Reviewed the first execution pass."],
@@ -44,6 +66,7 @@ if (isReviewPrompt) {
       {
         id: "step-1",
         title: isCorrectionPlan ? "Apply follow-up correction" : "Implement first pass",
+        goal: isCorrectionPlan ? "Resolve the reviewer contradiction." : "Deliver the first execution pass.",
         description: isCorrectionPlan
           ? "Execute the corrected follow-up implementation."
           : "Execute the initial implementation for the request.",
@@ -52,6 +75,11 @@ if (isReviewPrompt) {
           : "Implement the initial version of the requested work.",
         dependsOn: [],
         doneWhen: ["Worker reports completion without errors."],
+        claims: [isCorrectionPlan ? "The reviewer contradiction is resolved." : "The initial implementation pass is complete."],
+        expectedEvidence: [isCorrectionPlan ? "Reviewer approves the corrected pass." : "Worker reports completion without errors."],
+        writeScope: ["<workspace>"],
+        verificationRules: [isCorrectionPlan ? "Reviewer approves the corrected pass." : "Validate the first implementation pass."],
+        fallback: ["Re-plan using the latest contradiction packet."],
       },
     ],
     replan_triggers: ["Reviewer requests changes."],

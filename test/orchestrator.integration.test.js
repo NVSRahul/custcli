@@ -51,19 +51,27 @@ test("custcli run orchestrates planner and worker with mock commands", async () 
   assert.match(summary.worker.finalText, /Mock worker executed/)
   assert.equal(summary.review.verdict, "approved")
   assert.equal(summary.correctionLoopCount, 0)
+  assert.equal(summary.evidence.verifiedStepCount, 1)
+  assert.equal(summary.routing.loopBudget, 1)
 
   const planPath = path.join(summary.artifactDir, "plan.json")
   const compactPlanPath = path.join(summary.artifactDir, "plan-compact.json")
   const workerEventsPath = path.join(summary.artifactDir, "worker-events.json")
   const reviewPath = path.join(summary.artifactDir, "review.json")
   const compactReviewPath = path.join(summary.artifactDir, "review-compact.json")
+  const evidencePath = path.join(summary.artifactDir, "evidence-graph.json")
+  const promotionsPath = path.join(summary.artifactDir, "promotions.json")
+  const memoryHotPath = path.join(summary.artifactDir, "memory-hot.json")
 
-  const [planRaw, compactPlanRaw, workerEventsRaw, reviewRaw, compactReviewRaw] = await Promise.all([
+  const [planRaw, compactPlanRaw, workerEventsRaw, reviewRaw, compactReviewRaw, evidenceRaw, promotionsRaw, memoryHotRaw] = await Promise.all([
     fs.readFile(planPath, "utf8"),
     fs.readFile(compactPlanPath, "utf8"),
     fs.readFile(workerEventsPath, "utf8"),
     fs.readFile(reviewPath, "utf8"),
     fs.readFile(compactReviewPath, "utf8"),
+    fs.readFile(evidencePath, "utf8"),
+    fs.readFile(promotionsPath, "utf8"),
+    fs.readFile(memoryHotPath, "utf8"),
   ])
 
   const plan = JSON.parse(planRaw)
@@ -71,12 +79,19 @@ test("custcli run orchestrates planner and worker with mock commands", async () 
   const workerEvents = JSON.parse(workerEventsRaw)
   const review = JSON.parse(reviewRaw)
   const compactReview = JSON.parse(compactReviewRaw)
+  const evidence = JSON.parse(evidenceRaw)
+  const promotions = JSON.parse(promotionsRaw)
+  const memoryHot = JSON.parse(memoryHotRaw)
 
   assert.equal(plan.executionSteps.length, 1)
   assert.equal(compactPlan.executionSteps.length, 1)
+  assert.ok(Array.isArray(plan.executionSteps[0].claims))
   assert.equal(workerEvents.length, 3)
   assert.equal(review.verdict, "approved")
   assert.equal(compactReview.verdict, "approved")
+  assert.equal(evidence.verifiedStepCount, 1)
+  assert.equal(promotions.candidates.length >= promotions.promoted.length, true)
+  assert.equal(memoryHot.evidence.verifiedStepCount, 1)
 })
 
 test("custcli run performs one correction loop when review requests changes", async () => {
@@ -95,13 +110,15 @@ test("custcli run performs one correction loop when review requests changes", as
   assert.equal(summary.review.verdict, "approved")
   assert.equal(summary.correctionLoopCount, 1)
   assert.equal(summary.contradictionCount, 2)
+  assert.equal(summary.routing.loopBudget, 2)
 
-  const [historyRaw, contradictionsRaw, planPass2Raw, compactPlanPass2Raw, compactReviewPass2Raw] = await Promise.all([
+  const [historyRaw, contradictionsRaw, planPass2Raw, compactPlanPass2Raw, compactReviewPass2Raw, evidencePass2Raw] = await Promise.all([
     fs.readFile(path.join(summary.artifactDir, "review-history.json"), "utf8"),
     fs.readFile(path.join(summary.artifactDir, "contradictions.json"), "utf8"),
     fs.readFile(path.join(summary.artifactDir, "plan-pass-2.json"), "utf8"),
     fs.readFile(path.join(summary.artifactDir, "plan-compact-pass-2.json"), "utf8"),
     fs.readFile(path.join(summary.artifactDir, "review-compact-pass-2.json"), "utf8"),
+    fs.readFile(path.join(summary.artifactDir, "evidence-compact-pass-2.json"), "utf8"),
   ])
 
   const history = JSON.parse(historyRaw)
@@ -109,14 +126,17 @@ test("custcli run performs one correction loop when review requests changes", as
   const secondPlan = JSON.parse(planPass2Raw)
   const compactSecondPlan = JSON.parse(compactPlanPass2Raw)
   const compactSecondReview = JSON.parse(compactReviewPass2Raw)
+  const compactSecondEvidence = JSON.parse(evidencePass2Raw)
 
   assert.equal(history.length, 2)
   assert.equal(history[0].verdict, "changes_requested")
   assert.equal(history[1].verdict, "approved")
   assert.equal(contradictions.length, 2)
+  assert.equal(contradictions[0].contradictionTarget, "step-1")
   assert.match(secondPlan.goal, /corrected implementation/i)
   assert.match(compactSecondPlan.goal, /corrected implementation/i)
   assert.equal(compactSecondReview.verdict, "approved")
+  assert.equal(compactSecondEvidence.stepEvidence.length, 1)
 })
 
 test("custcli plan fails fast with actionable guidance when Gemini stalls in headless mode", async () => {

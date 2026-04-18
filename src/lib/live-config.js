@@ -3,7 +3,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 export const LIVE_AGENT_NAME = "custcli-live"
-export const LIVE_CONFIG_VERSION = 13
+export const LIVE_CONFIG_VERSION = 14
 
 function resolveArtifactRoot(cwd, artifactRoot) {
   return path.resolve(artifactRoot ?? process.env.CUSTCLI_SESSION_DIR ?? path.join(cwd, ".custcli"))

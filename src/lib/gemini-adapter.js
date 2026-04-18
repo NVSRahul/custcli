@@ -228,13 +228,12 @@ async function runGeminiJsonCall({
 export async function runGeminiReviewer({
   cwd,
   request,
-  implementationSummary,
-  changedFiles = [],
+  compactPlan,
+  compactEvidence,
   testsRun = [],
   openQuestions,
   contradictions = [],
-  planGoal,
-  planSummary,
+  routing,
   plannerModel,
   plannerSession,
   plannerApprovalMode = "plan",
@@ -242,13 +241,12 @@ export async function runGeminiReviewer({
 }) {
   const reviewPrompt = createReviewPrompt({
     request,
-    implementationSummary,
-    changedFiles,
+    compactPlan,
+    compactEvidence,
     testsRun,
     openQuestions,
     contradictions,
-    planGoal,
-    planSummary,
+    routing,
     cwd,
   })
 

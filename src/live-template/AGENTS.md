@@ -19,6 +19,7 @@ Work simply and directly:
 - OpenCode is the executor, verifier, improver, and user-facing synthesizer.
 - Treat Gemini output as high-authority guidance, then check it against the repository, tool output, and user intent before acting.
 - Treat Gemini plan/review results as internal guidance, not user-facing text to dump back into chat.
+- The live runtime now writes typed plan, evidence, contradiction, routing, and promotion artifacts. Prefer the compact files first: `plan-compact.json`, `review-compact.json`, `evidence-compact.json`, and `contradictions-compact.json`.
 - If Gemini is right, continue with it. If it is weak or contradicted by the workspace, correct course and re-plan or re-review.
 - If Gemini appears wrong or hallucinates, do not ignore it silently. State the concrete contradiction in a follow-up `gemini_plan` or `gemini_review` call when practical, then use the corrected result before answering the user.
 - Surface the important Gemini findings, risks, and review results, but do not claim access to hidden reasoning.
@@ -28,6 +29,7 @@ Work simply and directly:
 - If a long answer is needed, send it in clean chunks or sections instead of switching to a file.
 - Distill Gemini output to only what matters for the current action or answer. Do not paste large raw Gemini blocks into the conversation.
 - If you truly need more Gemini detail, inspect the returned artifact directory with `Read`/`Grep` and prefer the distilled files such as `plan.json` or `review.json` before touching larger raw outputs.
+- If the current turn is a correction pass, pass the concrete contradiction summaries back into `gemini_plan` or `gemini_review` instead of pasting raw Gemini output blocks into chat.
 
 Gemini request hygiene:
 

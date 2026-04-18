@@ -66,6 +66,14 @@ Live TUI:
 custcli live --new-session --planner-model auto
 ```
 
+Strict live TUI:
+
+```bash
+custcli live --new-session --planner-model auto --planner-mode strict
+```
+
+Use `strict` only if you want Gemini enforced first on substantive turns. It is more structured, but it can use more context and call Gemini more often than the default `free` mode.
+
 List live sessions:
 
 ```bash

@@ -18,7 +18,8 @@ process.stdin.on("end", () => {
       type: "text",
       part: {
         type: "text",
-        text: `Mock worker executed. Prompt size=${stdin.trim().length}`,
+        text: `Mock worker executed. Worker reports completion without errors. Prompt size=${stdin.trim().length}`,
+        changedFiles: ["src/mock-output.js"],
         time: { end: Date.now() },
       },
     })}\n`,

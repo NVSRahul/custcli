@@ -14,11 +14,25 @@ export function createWorkerPrompt({ userPrompt, plan, plannerSessionId }) {
     .map((step, index) => {
       const dependsOn = step.dependsOn.length ? `Depends on: ${step.dependsOn.join(", ")}` : "Depends on: none"
       const doneWhen = step.doneWhen.length ? `Done when: ${step.doneWhen.join("; ")}` : "Done when: step intent is satisfied"
+      const claims = step.claims.length ? `Claims: ${step.claims.join("; ")}` : "Claims: none provided"
+      const expectedEvidence = step.expectedEvidence.length
+        ? `Expected evidence: ${step.expectedEvidence.join("; ")}`
+        : "Expected evidence: none provided"
+      const writeScope = step.writeScope.length ? `Write scope: ${step.writeScope.join(", ")}` : "Write scope: <workspace>"
+      const verification = step.verificationRules.length
+        ? `Verification rules: ${step.verificationRules.join("; ")}`
+        : "Verification rules: none provided"
+      const fallback = step.fallback.length ? `Fallback: ${step.fallback.join("; ")}` : "Fallback: request a corrected plan"
       return [
         `${index + 1}. ${step.title}`,
         step.description || "No extra description provided.",
         dependsOn,
         doneWhen,
+        claims,
+        expectedEvidence,
+        writeScope,
+        verification,
+        fallback,
         `Worker directive: ${step.opencodePrompt}`,
       ].join("\n")
     })
@@ -32,6 +46,9 @@ export function createWorkerPrompt({ userPrompt, plan, plannerSessionId }) {
     `Planner session ID: ${plannerSessionId ?? "not returned"}`,
     `Workspace summary: ${plan.workspaceSummary || "not provided"}`,
     `Reasoning summary: ${plan.reasoningSummary}`,
+    "",
+    "Plan claims:",
+    ...(plan.planClaims?.length ? plan.planClaims.map((item) => `- ${item}`) : ["- None recorded"]),
     "",
     "Findings:",
     ...(plan.findings.length ? plan.findings.map((item) => `- ${item}`) : ["- None recorded"]),

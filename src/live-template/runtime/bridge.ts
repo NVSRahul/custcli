@@ -577,37 +577,195 @@ function asArray(value) {
   return [String(value).trim()].filter(Boolean)
 }
 
-function normalizeSteps(value) {
-  const steps = Array.isArray(value) ? value : []
-  if (steps.length === 0) {
-    return [
-      {
-        id: "step-1",
-        title: "Implement requested work",
-        description: "Apply the planned implementation in the current workspace.",
-        opencodePrompt: "Implement the requested work in the current workspace.",
-        dependsOn: [],
-        doneWhen: ["The request is satisfied safely and verified."],
-      },
-    ]
-  }
+function uniqueStrings(values) {
+  return Array.from(new Set(asArray(values)))
+}
 
-  return steps.map((step, index) => ({
+function normalizeSeverity(value) {
+  const normalized = String(value ?? "").trim().toLowerCase()
+  if (normalized === "critical" || normalized === "high" || normalized === "medium" || normalized === "low") {
+    return normalized
+  }
+  return "medium"
+}
+
+function normalizeStep(step, index, globals) {
+  const title = String(step?.title ?? step?.name ?? `Step ${index + 1}`)
+  const doneWhen = asArray(step?.doneWhen ?? step?.success_criteria)
+  const claims = uniqueStrings(step?.claims ?? step?.claim ?? doneWhen ?? [`Complete ${title}`])
+  const expectedEvidence = uniqueStrings(step?.expectedEvidence ?? step?.expected_evidence ?? doneWhen)
+  const writeScope = uniqueStrings(step?.writeScope ?? step?.write_scope ?? step?.paths ?? step?.files)
+  const verificationRules = uniqueStrings(
+    step?.verificationRules ?? step?.verification_rules ?? step?.verification_rule ?? doneWhen ?? globals.successCriteria,
+  )
+  const fallback = uniqueStrings(step?.fallback ?? step?.fallback_steps ?? step?.fallbackSteps ?? globals.replanTriggers)
+
+  return {
     id: String(step?.id ?? `step-${index + 1}`),
-    title: String(step?.title ?? step?.name ?? `Step ${index + 1}`),
+    title,
+    goal: String(step?.goal ?? title),
     description: String(step?.description ?? step?.details ?? step?.prompt ?? ""),
     opencodePrompt: String(
       step?.opencodePrompt ??
         step?.worker_prompt ??
         step?.prompt ??
-        `Execute "${String(step?.title ?? `Step ${index + 1}`)}" in the current workspace.`,
+        `Execute "${title}" in the current workspace.`,
     ),
     dependsOn: asArray(step?.dependsOn ?? step?.requires),
-    doneWhen: asArray(step?.doneWhen ?? step?.success_criteria),
+    doneWhen,
+    claims: claims.length > 0 ? claims : [`Complete ${title}`],
+    expectedEvidence: expectedEvidence.length > 0 ? expectedEvidence : doneWhen,
+    writeScope: writeScope.length > 0 ? writeScope : ["<workspace>"],
+    verificationRules: verificationRules.length > 0 ? verificationRules : doneWhen,
+    fallback: fallback.length > 0 ? fallback : ["Escalate the contradiction and request a corrected plan."],
+  }
+}
+
+function ensureUniqueStepIds(steps) {
+  const counts = new Map()
+  return steps.map((step) => {
+    const current = counts.get(step.id) ?? 0
+    counts.set(step.id, current + 1)
+    if (current === 0) return step
+    return {
+      ...step,
+      id: `${step.id}-${current + 1}`,
+    }
+  })
+}
+
+function sanitizeDependencies(steps) {
+  const knownIds = new Set(steps.map((step) => step.id))
+  return steps.map((step) => ({
+    ...step,
+    dependsOn: uniqueStrings(step.dependsOn).filter((item) => item !== step.id && knownIds.has(item)),
   }))
 }
 
+function machineCheckPlan(plan) {
+  const steps = Array.isArray(plan?.executionSteps) ? plan.executionSteps : []
+  const issues = []
+  const warnings = []
+  const ids = new Set()
+
+  for (const step of steps) {
+    if (ids.has(step.id)) {
+      issues.push(`Duplicate step id "${step.id}" remained after normalization.`)
+    }
+    ids.add(step.id)
+    if (!step.opencodePrompt.trim()) issues.push(`Step "${step.id}" is missing an execution prompt.`)
+    if (step.writeScope.length === 1 && step.writeScope[0] === "<workspace>") {
+      warnings.push(`Step "${step.id}" did not provide a narrow write scope.`)
+    }
+    if (step.expectedEvidence.length === 0) {
+      warnings.push(`Step "${step.id}" did not provide explicit expected evidence.`)
+    }
+    if (step.fallback.length === 0) {
+      warnings.push(`Step "${step.id}" did not provide a fallback path.`)
+    }
+  }
+
+  return {
+    readyForExecution: issues.length === 0,
+    issues,
+    warnings,
+    checks: [
+      {
+        name: "unique_step_ids",
+        ok: issues.every((item) => !/Duplicate step id/i.test(item)),
+      },
+      {
+        name: "dependency_graph",
+        ok: steps.every((step) => step.dependsOn.every((item) => item !== step.id)),
+      },
+      {
+        name: "claims_present",
+        ok: steps.every((step) => step.claims.length > 0),
+      },
+      {
+        name: "expected_evidence_present",
+        ok: steps.every((step) => step.expectedEvidence.length > 0),
+      },
+      {
+        name: "verification_rules_present",
+        ok: steps.every((step) => step.verificationRules.length > 0),
+      },
+      {
+        name: "fallback_present",
+        ok: steps.every((step) => step.fallback.length > 0),
+      },
+    ],
+  }
+}
+
+function compactPlan(plan) {
+  return {
+    goal: clipInlineText(plan?.goal, 220) || "Complete the requested work",
+    workspaceSummary: clipInlineText(plan?.workspaceSummary, 320),
+    reasoningSummary: clipInlineText(plan?.reasoningSummary, 320),
+    decisionLog: asArray(plan?.decisionLog).slice(0, 5).map((item) => clipInlineText(item, 180)),
+    findings: asArray(plan?.findings).slice(0, 5).map((item) => clipInlineText(item, 180)),
+    assumptions: asArray(plan?.assumptions).slice(0, 5).map((item) => clipInlineText(item, 180)),
+    risks: asArray(plan?.risks).slice(0, 5).map((item) => clipInlineText(item, 180)),
+    planClaims: uniqueStrings(plan?.planClaims).slice(0, 6).map((item) => clipInlineText(item, 180)),
+    executionSteps: (Array.isArray(plan?.executionSteps) ? plan.executionSteps : []).map((step, index) => ({
+      id: String(step?.id ?? `step-${index + 1}`),
+      title: clipInlineText(step?.title ?? `Step ${index + 1}`, 140),
+      goal: clipInlineText(step?.goal ?? step?.title ?? `Step ${index + 1}`, 160),
+      description: clipInlineText(step?.description ?? "", 220),
+      opencodePrompt: clipInlineText(step?.opencodePrompt ?? "", 320),
+      dependsOn: asArray(step?.dependsOn).slice(0, 5).map((item) => clipInlineText(item, 120)),
+      doneWhen: asArray(step?.doneWhen).slice(0, 5).map((item) => clipInlineText(item, 140)),
+      claims: asArray(step?.claims).slice(0, 5).map((item) => clipInlineText(item, 140)),
+      expectedEvidence: asArray(step?.expectedEvidence).slice(0, 5).map((item) => clipInlineText(item, 140)),
+      writeScope: asArray(step?.writeScope).slice(0, 5).map((item) => clipInlineText(item, 120)),
+      verificationRules: asArray(step?.verificationRules).slice(0, 5).map((item) => clipInlineText(item, 140)),
+      fallback: asArray(step?.fallback).slice(0, 5).map((item) => clipInlineText(item, 140)),
+    })),
+    replanTriggers: asArray(plan?.replanTriggers).slice(0, 5).map((item) => clipInlineText(item, 160)),
+    successCriteria: asArray(plan?.successCriteria).slice(0, 5).map((item) => clipInlineText(item, 180)),
+    machineCheck: {
+      readyForExecution: Boolean(plan?.machineCheck?.readyForExecution),
+      issues: asArray(plan?.machineCheck?.issues).slice(0, 5).map((item) => clipInlineText(item, 160)),
+      warnings: asArray(plan?.machineCheck?.warnings).slice(0, 5).map((item) => clipInlineText(item, 160)),
+      checks: Array.isArray(plan?.machineCheck?.checks)
+        ? plan.machineCheck.checks.map((item) => ({
+            name: String(item?.name ?? ""),
+            ok: Boolean(item?.ok),
+          }))
+        : [],
+    },
+  }
+}
+
 function normalizePlan(plan, rawResponse) {
+  const globals = {
+    replanTriggers: asArray(plan?.replan_triggers ?? plan?.replanTriggers),
+    successCriteria: asArray(plan?.success_criteria ?? plan?.successCriteria),
+  }
+
+  const rawSteps = Array.isArray(plan?.execution_steps ?? plan?.executionSteps)
+    ? plan.execution_steps ?? plan.executionSteps
+    : []
+  let executionSteps = rawSteps.length
+    ? rawSteps.map((step, index) => normalizeStep(step, index, globals))
+    : [
+        normalizeStep(
+          {
+            id: "step-1",
+            title: "Implement requested work",
+            goal: "Implement the requested work in the current workspace.",
+            description: "Apply the planned implementation in the current workspace.",
+            opencodePrompt: "Implement the requested work in the current workspace.",
+            doneWhen: ["The requested work is implemented and verified."],
+          },
+          0,
+          globals,
+        ),
+      ]
+
+  executionSteps = sanitizeDependencies(ensureUniqueStepIds(executionSteps))
+
   const normalized = {
     goal: String(plan?.goal ?? "Complete the requested work"),
     workspaceSummary: String(plan?.workspace_summary ?? plan?.workspaceSummary ?? ""),
@@ -616,16 +774,24 @@ function normalizePlan(plan, rawResponse) {
     findings: asArray(plan?.findings),
     assumptions: asArray(plan?.assumptions),
     risks: asArray(plan?.risks),
-    executionSteps: normalizeSteps(plan?.execution_steps ?? plan?.executionSteps),
-    replanTriggers: asArray(plan?.replan_triggers ?? plan?.replanTriggers),
-    successCriteria: asArray(plan?.success_criteria ?? plan?.successCriteria),
+    planClaims: uniqueStrings(plan?.plan_claims ?? plan?.planClaims ?? globals.successCriteria),
+    executionSteps,
+    replanTriggers: globals.replanTriggers,
+    successCriteria: globals.successCriteria,
     rawResponse,
   }
 
   if (!normalized.reasoningSummary) {
     normalized.reasoningSummary = normalized.findings[0] ?? "Planner returned a plan without a separate reasoning summary."
   }
+  if (normalized.planClaims.length === 0) {
+    normalized.planClaims = uniqueStrings([
+      ...normalized.successCriteria,
+      ...normalized.executionSteps.flatMap((step) => step.claims),
+    ])
+  }
 
+  normalized.machineCheck = machineCheckPlan(normalized)
   return normalized
 }
 
@@ -647,14 +813,20 @@ function extractPlan(responseText) {
       findings: [],
       assumptions: [],
       risks: ["Planner returned non-JSON output."],
+      plan_claims: ["Requested work is implemented and verified."],
       execution_steps: [
         {
           id: "step-1",
           title: "Implement based on planner notes",
+          goal: "Implement the requested work based on the planner notes.",
           description: responseText.trim(),
           opencodePrompt: responseText.trim() || "Implement the requested work in the current workspace.",
-          dependsOn: [],
           doneWhen: ["Requested work is implemented and verified."],
+          claims: ["Requested work is implemented and verified."],
+          expectedEvidence: ["Worker output confirms the requested change."],
+          writeScope: ["<workspace>"],
+          verificationRules: ["Validate the requested work before concluding."],
+          fallback: ["Review the raw planner artifact before concluding."],
         },
       ],
       replan_triggers: ["Worker reports ambiguity or plan mismatch."],
@@ -664,11 +836,61 @@ function extractPlan(responseText) {
   )
 }
 
+function normalizeFinding(item, index) {
+  if (typeof item === "string") {
+    return {
+      id: `finding-${index + 1}`,
+      severity: "medium",
+      summary: item.trim(),
+      details: item.trim(),
+      contradictionTarget: null,
+      evidence: "",
+      replanScope: [],
+      verificationTarget: null,
+    }
+  }
+
+  return {
+    id: String(item?.id ?? `finding-${index + 1}`),
+    severity: normalizeSeverity(item?.severity),
+    summary: String(item?.summary ?? item?.title ?? item?.claim ?? `Finding ${index + 1}`),
+    details: String(item?.details ?? item?.summary ?? item?.title ?? ""),
+    contradictionTarget: item?.contradictionTarget ? String(item.contradictionTarget) : null,
+    evidence: String(item?.evidence ?? ""),
+    replanScope: asArray(item?.replanScope),
+    verificationTarget: item?.verificationTarget ? String(item.verificationTarget) : null,
+  }
+}
+
+function compactReview(review) {
+  return {
+    verdict: String(review?.verdict ?? "needs_followup"),
+    summary: clipInlineText(review?.summary, 320),
+    findings: asArray(review?.findings).slice(0, 5).map((item) => clipInlineText(item, 180)),
+    findingDetails: (Array.isArray(review?.findingDetails) ? review.findingDetails : []).slice(0, 5).map((item) => ({
+      id: String(item?.id ?? ""),
+      severity: normalizeSeverity(item?.severity),
+      summary: clipInlineText(item?.summary, 180),
+      contradictionTarget: item?.contradictionTarget ?? null,
+      verificationTarget: item?.verificationTarget ?? null,
+      replanScope: asArray(item?.replanScope).slice(0, 5).map((entry) => clipInlineText(entry, 120)),
+    })),
+    risks: asArray(review?.risks).slice(0, 5).map((item) => clipInlineText(item, 180)),
+    followUpSteps: asArray(review?.followUpSteps).slice(0, 5).map((item) => clipInlineText(item, 180)),
+    tests: asArray(review?.tests).slice(0, 5).map((item) => clipInlineText(item, 160)),
+  }
+}
+
 function normalizeReview(review, rawResponse) {
+  const findingDetails = Array.isArray(review?.findings)
+    ? review.findings.map((item, index) => normalizeFinding(item, index))
+    : []
+
   const normalized = {
     verdict: String(review?.verdict ?? "needs_followup"),
     summary: String(review?.summary ?? review?.reasoning_summary ?? ""),
-    findings: asArray(review?.findings),
+    findings: findingDetails.map((item) => item.summary),
+    findingDetails,
     risks: asArray(review?.risks),
     followUpSteps: asArray(review?.follow_up_steps ?? review?.followUpSteps),
     tests: asArray(review?.tests ?? review?.test_gaps),
@@ -704,6 +926,117 @@ function extractReview(responseText) {
   )
 }
 
+function createPlannerPrompt({ userPrompt, cwd, knowledge = [] }) {
+  const knowledgeBlock =
+    knowledge.length === 0
+      ? "No prior local execution lessons were found."
+      : knowledge
+          .map(
+            (item, index) =>
+              `${index + 1}. Goal: ${item.goal}\nReasoning summary: ${item.reasoningSummary}\nOutcome: ${item.workerStatus}`,
+          )
+          .join("\n\n")
+
+  return [
+    "You are the sovereign planner for a paired coding system.",
+    "Gemini owns planning and codebase analysis. OpenCode will execute the work after you respond.",
+    "Return strict JSON only. Do not wrap the JSON in markdown fences.",
+    "Every execution step must be machine-checkable and scoped for later contradiction handling.",
+    "",
+    "Your JSON schema:",
+    "{",
+    '  "goal": "string",',
+    '  "workspace_summary": "string",',
+    '  "reasoning_summary": "string",',
+    '  "decision_log": ["string"],',
+    '  "findings": ["string"],',
+    '  "assumptions": ["string"],',
+    '  "risks": ["string"],',
+    '  "plan_claims": ["string"],',
+    '  "execution_steps": [',
+    "    {",
+    '      "id": "string",',
+    '      "title": "string",',
+    '      "goal": "string",',
+    '      "description": "string",',
+    '      "opencodePrompt": "string",',
+    '      "dependsOn": ["string"],',
+    '      "doneWhen": ["string"],',
+    '      "claims": ["string"],',
+    '      "expectedEvidence": ["string"],',
+    '      "writeScope": ["string"],',
+    '      "verificationRules": ["string"],',
+    '      "fallback": ["string"]',
+    "    }",
+    "  ],",
+    '  "replan_triggers": ["string"],',
+    '  "success_criteria": ["string"]',
+    "}",
+    "",
+    `Workspace root: ${cwd}`,
+    "",
+    "Prior local execution lessons:",
+    knowledgeBlock,
+    "",
+    "User request:",
+    userPrompt,
+  ].join("\n")
+}
+
+function createReviewPrompt({ request, compactPlan, compactEvidence, testsRun, openQuestions, contradictions = [], routing, cwd }) {
+  const tests = testsRun.length ? testsRun.map((item) => `- ${item}`) : ["- None provided"]
+
+  return [
+    "You are reviewing work performed by OpenCode in a paired coding workflow.",
+    "Assess correctness, regression risk, plan fidelity, and missing validation using the structured plan and evidence graph below.",
+    "Return strict JSON only. Do not wrap the JSON in markdown fences.",
+    "",
+    "Your JSON schema:",
+    "{",
+    '  "verdict": "approved | changes_requested | needs_followup",',
+    '  "summary": "string",',
+    '  "findings": [',
+    "    {",
+    '      "id": "string",',
+    '      "severity": "critical | high | medium | low",',
+    '      "summary": "string",',
+    '      "details": "string",',
+    '      "contradictionTarget": "string | null",',
+    '      "evidence": "string",',
+    '      "replanScope": ["string"],',
+    '      "verificationTarget": "string | null"',
+    "    }",
+    "  ],",
+    '  "risks": ["string"],',
+    '  "follow_up_steps": ["string"],',
+    '  "tests": ["string"]',
+    "}",
+    "",
+    `Workspace root: ${cwd}`,
+    "",
+    "Original request:",
+    request,
+    "",
+    "Compact plan artifact:",
+    JSON.stringify(compactPlan ?? {}, null, 2),
+    "",
+    "Compact execution evidence:",
+    JSON.stringify(compactEvidence ?? {}, null, 2),
+    "",
+    "Concrete contradictions from prior passes:",
+    JSON.stringify(Array.isArray(contradictions) ? contradictions : [], null, 2),
+    "",
+    "Routing context:",
+    JSON.stringify(routing ?? {}, null, 2),
+    "",
+    "Tests already run:",
+    ...tests,
+    "",
+    "Open questions:",
+    openQuestions?.trim() || "None provided",
+  ].join("\n")
+}
+
 function tokenize(text) {
   return String(text)
     .toLowerCase()
@@ -722,6 +1055,481 @@ function overlapScore(a, b) {
   return score
 }
 
+function countSignals(items, threshold = 0) {
+  const total = Array.isArray(items) ? items.length : 0
+  return total > threshold ? 1 : 0
+}
+
+function normalizeChangedFiles(files) {
+  return uniqueStrings(files).sort()
+}
+
+function pathMatchesScope(filePath, scope) {
+  const normalizedScope = String(scope ?? "").trim().replace(/\\/g, "/").toLowerCase()
+  if (!normalizedScope || normalizedScope === "<workspace>") return true
+
+  const normalizedFile = String(filePath ?? "").trim().replace(/\\/g, "/").toLowerCase()
+  return (
+    normalizedFile === normalizedScope ||
+    normalizedFile.endsWith(`/${normalizedScope}`) ||
+    normalizedFile.includes(normalizedScope)
+  )
+}
+
+function pickMatchedItems(items, text, threshold = 2) {
+  const haystack = String(text ?? "")
+  return uniqueStrings(items).filter((item) => overlapScore(item, haystack) >= threshold)
+}
+
+function deriveVerificationStatus({ failures, writeScopeMatches, claimMatches, expectedMatches, verificationMatches }) {
+  if (failures.length > 0) return "blocked"
+  const evidenceCount = writeScopeMatches.length + claimMatches.length + expectedMatches.length + verificationMatches.length
+  if (evidenceCount === 0) return "missing"
+  if (writeScopeMatches.length > 0 && (claimMatches.length > 0 || expectedMatches.length > 0 || verificationMatches.length > 0)) {
+    return "verified"
+  }
+  return "partial"
+}
+
+function createLiveEvidenceGraph({
+  plan,
+  implementationSummary,
+  changedFiles,
+  testsRun,
+  openQuestions,
+  passNumber,
+  request,
+  geminiSessionId,
+}) {
+  const normalizedChangedFiles = normalizeChangedFiles(changedFiles)
+  const summaryText = [implementationSummary, ...testsRun, openQuestions].filter(Boolean).join("\n")
+  const observedFailures = /fail|error|regress|blocked|missing/i.test(summaryText)
+    ? [clipInlineText(summaryText, 220)]
+    : []
+  const stepEvidence = (Array.isArray(plan?.executionSteps) ? plan.executionSteps : []).map((step) => {
+    const writeScopeMatches = normalizedChangedFiles.filter((filePath) => step.writeScope.some((scope) => pathMatchesScope(filePath, scope)))
+    const claimMatches = pickMatchedItems(step.claims, summaryText, 2)
+    const expectedMatches = pickMatchedItems(step.expectedEvidence, summaryText, 2)
+    const verificationMatches = pickMatchedItems(step.verificationRules, summaryText, 2)
+    const verificationStatus = deriveVerificationStatus({
+      failures: observedFailures,
+      writeScopeMatches,
+      claimMatches,
+      expectedMatches,
+      verificationMatches,
+    })
+
+    return {
+      stepId: step.id,
+      title: step.title,
+      goal: step.goal,
+      claims: step.claims,
+      expectedEvidence: step.expectedEvidence,
+      writeScope: step.writeScope,
+      verificationRules: step.verificationRules,
+      fallback: step.fallback,
+      writeScopeMatches,
+      observedEvidence: uniqueStrings([
+        ...writeScopeMatches.map((item) => `changed:${item}`),
+        ...claimMatches.map((item) => `claim:${clipInlineText(item, 120)}`),
+        ...expectedMatches.map((item) => `expected:${clipInlineText(item, 120)}`),
+        ...verificationMatches.map((item) => `verify:${clipInlineText(item, 120)}`),
+        ...testsRun.map((item) => `test:${clipInlineText(item, 120)}`),
+      ]),
+      missingEvidence: step.expectedEvidence.filter((item) => !expectedMatches.includes(item)),
+      verificationStatus,
+    }
+  })
+
+  const verifiedStepCount = stepEvidence.filter((item) => item.verificationStatus === "verified").length
+  const partialStepCount = stepEvidence.filter((item) => item.verificationStatus === "partial").length
+  const missingStepCount = stepEvidence.filter((item) => item.verificationStatus === "missing").length
+  const blockedStepCount = stepEvidence.filter((item) => item.verificationStatus === "blocked").length
+
+  return {
+    schemaVersion: 1,
+    request: String(request ?? "").trim(),
+    passNumber,
+    plannerSessionId: geminiSessionId ?? null,
+    goal: String(plan?.goal ?? "Complete the requested work"),
+    commandResult: {
+      status: observedFailures.length ? "needs_followup" : "completed",
+      code: null,
+      ok: observedFailures.length === 0,
+    },
+    changedFiles: normalizedChangedFiles,
+    observedFailures,
+    testsRun: asArray(testsRun),
+    finalText: String(implementationSummary ?? "").trim(),
+    stepEvidence,
+    verifiedStepCount,
+    partialStepCount,
+    missingStepCount,
+    blockedStepCount,
+    summary: clipInlineText(
+      [
+        `Review evidence pass ${passNumber}`,
+        `Changed files: ${normalizedChangedFiles.length}`,
+        `Verified steps: ${verifiedStepCount}/${stepEvidence.length}`,
+        observedFailures.length ? `Observed failures: ${observedFailures.length}` : "Observed failures: 0",
+      ].join(" | "),
+      220,
+    ),
+  }
+}
+
+function compactEvidenceGraph(graph) {
+  return {
+    schemaVersion: graph?.schemaVersion ?? 1,
+    passNumber: graph?.passNumber ?? 1,
+    goal: clipInlineText(graph?.goal, 180),
+    commandResult: {
+      status: String(graph?.commandResult?.status ?? "unknown"),
+      code: graph?.commandResult?.code ?? null,
+      ok: Boolean(graph?.commandResult?.ok),
+    },
+    changedFiles: normalizeChangedFiles(graph?.changedFiles).slice(0, 12),
+    observedFailures: uniqueStrings(graph?.observedFailures).slice(0, 8).map((item) => clipInlineText(item, 160)),
+    testsRun: asArray(graph?.testsRun).slice(0, 8).map((item) => clipInlineText(item, 140)),
+    finalText: clipInlineText(graph?.finalText, 320),
+    verifiedStepCount: Number(graph?.verifiedStepCount ?? 0),
+    partialStepCount: Number(graph?.partialStepCount ?? 0),
+    missingStepCount: Number(graph?.missingStepCount ?? 0),
+    blockedStepCount: Number(graph?.blockedStepCount ?? 0),
+    summary: clipInlineText(graph?.summary, 220),
+    stepEvidence: (Array.isArray(graph?.stepEvidence) ? graph.stepEvidence : []).map((item) => ({
+      stepId: String(item?.stepId ?? ""),
+      title: clipInlineText(item?.title, 120),
+      verificationStatus: String(item?.verificationStatus ?? "missing"),
+      writeScopeMatches: normalizeChangedFiles(item?.writeScopeMatches).slice(0, 6),
+      observedEvidence: uniqueStrings(item?.observedEvidence).slice(0, 6).map((entry) => clipInlineText(entry, 140)),
+      missingEvidence: uniqueStrings(item?.missingEvidence).slice(0, 4).map((entry) => clipInlineText(entry, 140)),
+    })),
+  }
+}
+
+function findFallbackTarget(evidenceGraph) {
+  const stepEvidence = Array.isArray(evidenceGraph?.stepEvidence) ? evidenceGraph.stepEvidence : []
+  return (
+    stepEvidence.find((item) => item.verificationStatus === "blocked") ??
+    stepEvidence.find((item) => item.verificationStatus === "missing") ??
+    stepEvidence.find((item) => item.verificationStatus === "partial") ??
+    stepEvidence[0] ??
+    null
+  )
+}
+
+function buildContradictions({ review, evidenceGraph, passNumber }) {
+  const stepIndex = new Map(
+    (Array.isArray(evidenceGraph?.stepEvidence) ? evidenceGraph.stepEvidence : []).map((item) => [item.stepId, item]),
+  )
+
+  const fallbackTarget = findFallbackTarget(evidenceGraph)
+  const contradictions = []
+  const findings = Array.isArray(review?.findingDetails) && review.findingDetails.length > 0
+    ? review.findingDetails
+    : asArray(review?.findings).map((item, index) => normalizeFinding(item, index))
+
+  for (const [index, finding] of findings.entries()) {
+    const target =
+      (finding?.contradictionTarget && stepIndex.get(String(finding.contradictionTarget))) ??
+      fallbackTarget
+
+    contradictions.push({
+      id: `pass-${passNumber}-finding-${index + 1}`,
+      severity: normalizeSeverity(finding?.severity),
+      claim: String(finding?.summary ?? finding?.details ?? `Finding ${index + 1}`).trim(),
+      evidence: String(
+        finding?.evidence ??
+          target?.observedEvidence?.join("; ") ??
+          evidenceGraph?.summary ??
+          review?.summary ??
+          "",
+      ).trim(),
+      source: "review:finding",
+      resolutionStatus: "open",
+      contradictionTarget: target?.stepId ?? null,
+      verificationTarget: String(
+        finding?.verificationTarget ??
+          target?.verificationRules?.[0] ??
+          target?.expectedEvidence?.[0] ??
+          "",
+      ).trim() || null,
+      replanScope: uniqueStrings(finding?.replanScope ?? [target?.stepId, ...(target?.writeScope ?? [])]),
+      passNumber,
+    })
+  }
+
+  for (const [index, risk] of asArray(review?.risks).entries()) {
+    const target = fallbackTarget
+    contradictions.push({
+      id: `pass-${passNumber}-risk-${index + 1}`,
+      severity: "medium",
+      claim: risk,
+      evidence: String(target?.observedEvidence?.join("; ") ?? evidenceGraph?.summary ?? review?.summary ?? "").trim(),
+      source: "review:risk",
+      resolutionStatus: "open",
+      contradictionTarget: target?.stepId ?? null,
+      verificationTarget: String(target?.verificationRules?.[0] ?? target?.expectedEvidence?.[0] ?? "").trim() || null,
+      replanScope: uniqueStrings([target?.stepId, ...(target?.writeScope ?? [])]),
+      passNumber,
+    })
+  }
+
+  return contradictions
+}
+
+function compactContradictions(contradictions) {
+  return (Array.isArray(contradictions) ? contradictions : []).map((item) => ({
+    id: String(item?.id ?? ""),
+    severity: normalizeSeverity(item?.severity),
+    claim: clipInlineText(item?.claim, 160),
+    evidence: clipInlineText(item?.evidence, 180),
+    source: String(item?.source ?? "unknown"),
+    resolutionStatus: String(item?.resolutionStatus ?? "open"),
+    contradictionTarget: item?.contradictionTarget ?? null,
+    verificationTarget: item?.verificationTarget ?? null,
+    replanScope: uniqueStrings(item?.replanScope).slice(0, 6),
+  }))
+}
+
+function normalizeContradictionInput(contradictions) {
+  return asArray(contradictions).map((item, index) => ({
+    id: `input-${index + 1}`,
+    severity: "medium",
+    claim: item,
+    evidence: "",
+    source: "tool-input",
+    resolutionStatus: "open",
+    contradictionTarget: null,
+    verificationTarget: null,
+    replanScope: [],
+  }))
+}
+
+function normalizeCompactPlanInput(value) {
+  if (!value) return null
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value)
+    } catch {
+      return {
+        summary: value,
+      }
+    }
+  }
+  return value
+}
+
+function computeRoutingDecision({ userPrompt, plan, reviewHistory = [], contradictions = [], plannerModel }) {
+  const promptLength = String(userPrompt ?? "").trim().length
+  const stepCount = Array.isArray(plan?.executionSteps) ? plan.executionSteps.length : 0
+  const planRiskCount = asArray(plan?.risks).length
+  const assumptionCount = asArray(plan?.assumptions).length
+  const contradictionCount = Array.isArray(contradictions) ? contradictions.length : 0
+  const changesRequestedCount = (Array.isArray(reviewHistory) ? reviewHistory : []).filter(
+    (item) => item?.verdict === "changes_requested" || item?.verdict === "needs_followup",
+  ).length
+
+  const complexityScore =
+    countSignals(stepCount >= 3 ? [1] : []) +
+    countSignals(planRiskCount >= 2 ? [1] : []) +
+    countSignals(assumptionCount >= 3 ? [1] : []) +
+    countSignals(promptLength >= 400 ? [1] : []) +
+    countSignals(contradictionCount >= 1 ? [1] : []) +
+    countSignals(changesRequestedCount >= 1 ? [1] : [])
+
+  const reasoningIntensity = complexityScore >= 5 ? "high" : complexityScore >= 3 ? "medium" : "baseline"
+  const reviewIntensity =
+    contradictionCount > 0 || changesRequestedCount > 0 || planRiskCount >= 2
+      ? "high"
+      : reasoningIntensity === "high"
+        ? "medium"
+        : "baseline"
+
+  return {
+    schemaVersion: 1,
+    complexityScore,
+    promptLength,
+    reasoning: {
+      provider: "gemini",
+      plannerModel: plannerModel ?? "auto",
+      intensity: reasoningIntensity,
+      reviewIntensity,
+      loopBudget: contradictionCount > 0 || complexityScore >= 4 ? 2 : 1,
+    },
+    execution: {
+      strategy: complexityScore >= 4 ? "guided" : "direct",
+      preferCompactArtifacts: true,
+      preferScopedCorrections: true,
+    },
+    memory: {
+      hotFirst: true,
+      warmOnDemand: true,
+      coldOnExplicitRead: true,
+      learnedOnlyAfterPromotion: true,
+    },
+    branchSearch: {
+      enabled: complexityScore >= 6 || contradictionCount >= 2,
+      maxBranches: complexityScore >= 7 ? 2 : 1,
+    },
+    summary: clipInlineText(
+      `Routing selected ${reasoningIntensity} planning, ${reviewIntensity} review, and a ${complexityScore >= 4 ? "guided" : "direct"} execution strategy.`,
+      220,
+    ),
+  }
+}
+
+function createCandidate({ type, title, content, evidence, gates }) {
+  const decision =
+    gates.validated && gates.repeated && gates.usefulAcrossSessions && gates.improvesEvals ? "promote" : "hold"
+
+  return {
+    id: `${type}-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "candidate"}`,
+    type,
+    title,
+    content,
+    evidence: uniqueStrings(evidence).slice(0, 8),
+    gates,
+    decision,
+  }
+}
+
+function compilePromotions({ history, prompt, plan, review, evidenceGraph, contradictions, routing }) {
+  const historyMatches = (Array.isArray(history) ? history : []).filter(
+    (item) => overlapScore(prompt, [item.prompt, item.goal, item.reasoningSummary].filter(Boolean).join(" ")) >= 3,
+  )
+  const successfulMatches = historyMatches.filter((item) => item.workerStatus === "approved" || item.workerStatus === "completed")
+  const candidates = []
+  const validated = review?.verdict === "approved"
+  const contradictionCount = Array.isArray(contradictions) ? contradictions.length : 0
+  const recurring = successfulMatches.length >= 1
+
+  const verificationTemplate = uniqueStrings([
+    ...asArray(plan?.successCriteria),
+    ...asArray(review?.tests),
+    ...(Array.isArray(evidenceGraph?.stepEvidence)
+      ? evidenceGraph.stepEvidence.flatMap((item) => item.verificationRules ?? [])
+      : []),
+  ])
+
+  if (verificationTemplate.length > 0) {
+    candidates.push(
+      createCandidate({
+        type: "verification_template",
+        title: "Validated review gate",
+        content: verificationTemplate.join(" | "),
+        evidence: [review?.summary, evidenceGraph?.summary],
+        gates: {
+          validated,
+          repeated: recurring,
+          usefulAcrossSessions: verificationTemplate.length >= 2,
+          improvesEvals: recurring && contradictionCount === 0,
+        },
+      }),
+    )
+  }
+
+  if (validated || contradictionCount > 0) {
+    candidates.push(
+      createCandidate({
+        type: "routing_rule",
+        title: "Escalate review on contradiction pressure",
+        content:
+          contradictionCount > 0
+            ? "When contradictions are open, raise review intensity and use scoped correction passes before concluding."
+            : "Keep review intensity proportional to plan risk and contradiction pressure.",
+        evidence: [routing?.summary, review?.summary],
+        gates: {
+          validated,
+          repeated: recurring || contradictionCount > 0,
+          usefulAcrossSessions: true,
+          improvesEvals: validated && (recurring || contradictionCount === 0),
+        },
+      }),
+    )
+  }
+
+  const reusableScopes = uniqueStrings(
+    (Array.isArray(evidenceGraph?.stepEvidence) ? evidenceGraph.stepEvidence : []).flatMap((item) => item.writeScope ?? []),
+  ).filter((item) => item !== "<workspace>")
+
+  if (validated && reusableScopes.length > 0) {
+    candidates.push(
+      createCandidate({
+        type: "policy",
+        title: "Prefer scoped verification",
+        content: `Prefer verifying changed scopes first: ${reusableScopes.join(", ")}`,
+        evidence: [evidenceGraph?.summary, ...reusableScopes],
+        gates: {
+          validated,
+          repeated: recurring,
+          usefulAcrossSessions: reusableScopes.length >= 1,
+          improvesEvals: recurring && contradictionCount === 0,
+        },
+      }),
+    )
+  }
+
+  return {
+    historySummary: {
+      comparedRuns: Array.isArray(history) ? history.length : 0,
+      similarRuns: historyMatches.length,
+      successfulSimilarRuns: successfulMatches.length,
+    },
+    candidates,
+    promoted: candidates.filter((item) => item.decision === "promote"),
+  }
+}
+
+function buildMemoryTiers({
+  plan,
+  planCompact,
+  review,
+  reviewCompact,
+  evidenceGraph,
+  evidenceCompact,
+  contradictions,
+  promotions,
+  knowledge,
+  routing,
+  artifacts,
+}) {
+  return {
+    hot: {
+      plan: planCompact,
+      review: reviewCompact ?? null,
+      evidence: evidenceCompact ?? null,
+      contradictions: Array.isArray(contradictions) ? contradictions.slice(0, 8) : [],
+      routing,
+    },
+    warm: {
+      relevantKnowledge: (Array.isArray(knowledge) ? knowledge : []).slice(0, 5).map((item) => ({
+        goal: clipInlineText(item.goal, 160),
+        reasoningSummary: clipInlineText(item.reasoningSummary, 180),
+        workerStatus: item.workerStatus,
+        artifactDir: item.artifactDir,
+      })),
+      promotionCandidates: Array.isArray(promotions?.candidates) ? promotions.candidates : [],
+      currentSignals: {
+        planGoal: clipInlineText(plan?.goal, 160),
+        reviewVerdict: review?.verdict ?? null,
+      },
+    },
+    cold: {
+      accessMode: "read_on_demand",
+      artifacts,
+      summary: clipInlineText(evidenceGraph?.summary ?? review?.summary ?? plan?.reasoningSummary, 220),
+    },
+    learned: {
+      promoted: Array.isArray(promotions?.promoted) ? promotions.promoted : [],
+      policyCount: (Array.isArray(promotions?.promoted) ? promotions.promoted : []).filter((item) => item.type === "policy").length,
+      routingRuleCount: (Array.isArray(promotions?.promoted) ? promotions.promoted : []).filter((item) => item.type === "routing_rule").length,
+      verificationTemplateCount: (Array.isArray(promotions?.promoted) ? promotions.promoted : []).filter((item) => item.type === "verification_template").length,
+    },
+  }
+}
+
 async function loadRelevantKnowledge({ prompt, cwd, limit = 3 }) {
   const filePath = path.join(artifactRoot, "knowledge", "executions.jsonl")
   const items = await readJsonl(filePath)
@@ -738,6 +1546,59 @@ async function loadRelevantKnowledge({ prompt, cwd, limit = 3 }) {
 async function appendKnowledgeRecord(record) {
   const filePath = path.join(artifactRoot, "knowledge", "executions.jsonl")
   await appendJsonl(filePath, record)
+}
+
+async function readJsonIfExists(filePath) {
+  try {
+    const raw = await fs.readFile(filePath, "utf8")
+    return JSON.parse(raw)
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return null
+    }
+    throw error
+  }
+}
+
+async function loadWorkspaceKnowledgeHistory(cwd, limit = 40) {
+  const filePath = path.join(artifactRoot, "knowledge", "executions.jsonl")
+  const records = await readJsonl(filePath)
+  return records.filter((item) => item.cwd === cwd).slice(-limit)
+}
+
+function buildColdArtifactIndex() {
+  return {
+    raw: [
+      "planner-prompt.txt",
+      "planner-stdout.json",
+      "planner-stderr.log",
+      "planner-envelope.json",
+      "review-prompt.txt",
+      "review-stdout.json",
+      "review-stderr.log",
+      "review-envelope.json",
+      "request.json",
+      "stdout.log",
+      "stderr.log",
+    ],
+    structured: [
+      "plan.json",
+      "plan-compact.json",
+      "plan-validation.json",
+      "review.json",
+      "review-compact.json",
+      "evidence-graph.json",
+      "evidence-compact.json",
+      "contradictions.json",
+      "contradictions-compact.json",
+      "routing.json",
+      "promotions.json",
+      "memory-hot.json",
+      "memory-warm.json",
+      "memory-cold.json",
+      "memory-learned.json",
+    ],
+  }
 }
 
 async function workspaceRoot(context) {
@@ -808,95 +1669,7 @@ function callDir(sessionID, kind) {
   )
 }
 
-function createPlannerPrompt({ userPrompt, cwd, knowledge = [] }) {
-  const knowledgeBlock =
-    knowledge.length === 0
-      ? "No prior local execution lessons were found."
-      : knowledge
-          .map(
-            (item, index) =>
-              `${index + 1}. Goal: ${item.goal}\nReasoning summary: ${item.reasoningSummary}\nOutcome: ${item.workerStatus}`,
-          )
-          .join("\n\n")
-
-  return [
-    "You are the sovereign planner for a paired coding system.",
-    "Gemini owns planning and codebase analysis. OpenCode will execute the work after you respond.",
-    "You may search and analyze as needed, but do not assume hidden reasoning will be available later.",
-    "Return strict JSON only. Do not wrap the JSON in markdown fences.",
-    "",
-    "Your JSON schema:",
-    "{",
-    '  "goal": "string",',
-    '  "workspace_summary": "string",',
-    '  "reasoning_summary": "string",',
-    '  "decision_log": ["string"],',
-    '  "findings": ["string"],',
-    '  "assumptions": ["string"],',
-    '  "risks": ["string"],',
-    '  "execution_steps": [',
-    "    {",
-    '      "id": "string",',
-    '      "title": "string",',
-    '      "description": "string",',
-    '      "opencodePrompt": "string",',
-    '      "dependsOn": ["string"],',
-    '      "doneWhen": ["string"]',
-    "    }",
-    "  ],",
-    '  "replan_triggers": ["string"],',
-    '  "success_criteria": ["string"]',
-    "}",
-    "",
-    `Workspace root: ${cwd}`,
-    "",
-    "Prior local execution lessons:",
-    knowledgeBlock,
-    "",
-    "User request:",
-    userPrompt,
-  ].join("\n")
-}
-
-function createReviewPrompt({ request, implementationSummary, changedFiles, testsRun, openQuestions, cwd }) {
-  const changed = changedFiles.length ? changedFiles.map((item) => `- ${item}`) : ["- None provided"]
-  const tests = testsRun.length ? testsRun.map((item) => `- ${item}`) : ["- None provided"]
-
-  return [
-    "You are reviewing work performed by OpenCode in a paired coding workflow.",
-    "Assess correctness, regression risk, plan fidelity, and missing validation.",
-    "Return strict JSON only. Do not wrap the JSON in markdown fences.",
-    "",
-    "Your JSON schema:",
-    "{",
-    '  "verdict": "approved | changes_requested | needs_followup",',
-    '  "summary": "string",',
-    '  "findings": ["string"],',
-    '  "risks": ["string"],',
-    '  "follow_up_steps": ["string"],',
-    '  "tests": ["string"]',
-    "}",
-    "",
-    `Workspace root: ${cwd}`,
-    "",
-    "Original request:",
-    request,
-    "",
-    "Implementation summary:",
-    implementationSummary,
-    "",
-    "Changed files:",
-    ...changed,
-    "",
-    "Tests already run:",
-    ...tests,
-    "",
-    "Open questions:",
-    openQuestions?.trim() || "None provided",
-  ].join("\n")
-}
-
-function formatPlanResult({ plan, geminiSessionId, artifactDir, fallbackNote }) {
+function formatPlanResult({ plan, planCompact, routing, geminiSessionId, artifactDir, fallbackNote }) {
   const steps = plan.executionSteps
     .slice(0, 3)
     .map((step, index) => `${index + 1}. ${step.title}`)
@@ -908,33 +1681,39 @@ function formatPlanResult({ plan, geminiSessionId, artifactDir, fallbackNote }) 
     `Planner session: ${geminiSessionId ?? "not returned"}`,
     `Planner artifacts: ${artifactDir}`,
     ...(fallbackNote ? [`Model note: ${fallbackNote}`] : []),
+    `Plan validation: ${plan.machineCheck?.readyForExecution ? "ready" : "needs attention"}`,
+    `Routing: ${routing?.summary ?? "not recorded"}`,
     "Key findings:",
     ...(plan.findings.length ? plan.findings.slice(0, 3).map((item) => `- ${clipInlineText(item, 180)}`) : ["- None recorded"]),
     "Key risks:",
     ...(plan.risks.length ? plan.risks.slice(0, 3).map((item) => `- ${clipInlineText(item, 180)}`) : ["- None recorded"]),
     "Next steps:",
     steps || "1. Implement requested work",
-    "If more detail is needed, inspect plan.json in the planner artifact directory first.",
+    "If more detail is needed, inspect plan-compact.json first, then plan.json and plan-validation.json.",
     "Use this as internal guidance. Do not quote it wholesale to the user.",
   ].join("\n")
 }
 
-function formatReviewResult({ review, geminiSessionId, artifactDir, fallbackNote }) {
+function formatReviewResult({ review, reviewCompact, evidenceCompact, contradictions, promotions, routing, geminiSessionId, artifactDir, fallbackNote }) {
   return [
     `Verdict: ${review.verdict}`,
     `Review summary: ${clipInlineText(review.summary, 220)}`,
     `Gemini session: ${geminiSessionId ?? "not returned"}`,
     `Review artifacts: ${artifactDir}`,
     ...(fallbackNote ? [`Model note: ${fallbackNote}`] : []),
+    `Evidence: ${evidenceCompact?.summary ?? "not recorded"}`,
+    `Contradictions: ${Array.isArray(contradictions) ? contradictions.length : 0}`,
+    `Promotions: ${Array.isArray(promotions?.promoted) ? promotions.promoted.length : 0}`,
+    `Routing: ${routing?.summary ?? "not recorded"}`,
     "Key findings:",
     ...(review.findings.length ? review.findings.slice(0, 3).map((item) => `- ${clipInlineText(item, 180)}`) : ["- None recorded"]),
     "Key risks:",
     ...(review.risks.length ? review.risks.slice(0, 3).map((item) => `- ${clipInlineText(item, 180)}`) : ["- None recorded"]),
     "Follow-up:",
-    ...(review.followUpSteps.length
-      ? review.followUpSteps.slice(0, 3).map((item) => `- ${clipInlineText(item, 180)}`)
+    ...(reviewCompact?.followUpSteps?.length
+      ? reviewCompact.followUpSteps.slice(0, 3).map((item) => `- ${clipInlineText(item, 180)}`)
       : ["- None recorded"]),
-    "If more detail is needed, inspect review.json in the review artifact directory first.",
+    "If more detail is needed, inspect review-compact.json, evidence-compact.json, and contradictions-compact.json first.",
     "Use this as internal guidance. Do not quote it wholesale to the user.",
   ].join("\n")
 }
@@ -1048,13 +1827,27 @@ async function runGeminiJson({ prompt, cwd, sessionId, model, progress }) {
   }
 }
 
-export async function runPlanningTool({ request, model, workspaceContext, context }) {
+export async function runPlanningTool({
+  request,
+  model,
+  workspaceContext,
+  contradictions = [],
+  previousPlanSummary,
+  previousReviewSummary,
+  routingContext,
+  context,
+}) {
   const cwd = await workspaceRoot(context)
   const state = await readSessionState(context.sessionID)
   const safeWorkspaceContext = sanitizeWorkspaceContext(workspaceContext, cwd)
+  const compactContradictionInput = compactContradictions(normalizeContradictionInput(contradictions))
   const combinedRequest = [
     String(request || "").trim(),
     safeWorkspaceContext ? `OpenCode workspace context:\n${safeWorkspaceContext}` : "",
+    previousPlanSummary ? `Previous compact plan summary:\n${previousPlanSummary}` : "",
+    previousReviewSummary ? `Previous compact review summary:\n${previousReviewSummary}` : "",
+    compactContradictionInput.length ? `Concrete contradictions:\n${JSON.stringify(compactContradictionInput, null, 2)}` : "",
+    routingContext ? `Routing context:\n${routingContext}` : "",
   ]
     .filter(Boolean)
     .join("\n\n")
@@ -1087,6 +1880,14 @@ export async function runPlanningTool({ request, model, workspaceContext, contex
     throw error
   }
   const plan = extractPlan(call.responseText)
+  const planCompact = compactPlan(plan)
+  const routing = computeRoutingDecision({
+    userPrompt: combinedRequest,
+    plan: planCompact,
+    reviewHistory: previousReviewSummary ? [{ verdict: "changes_requested" }] : [],
+    contradictions: compactContradictionInput,
+    plannerModel: call.resolvedModel ?? model,
+  })
   const artifactDir = callDir(context.sessionID, "plan")
 
   await Promise.all([
@@ -1095,9 +1896,16 @@ export async function runPlanningTool({ request, model, workspaceContext, contex
     writeText(path.join(artifactDir, "planner-stderr.log"), call.stderr),
     writeJson(path.join(artifactDir, "planner-envelope.json"), call.envelope),
     writeJson(path.join(artifactDir, "plan.json"), plan),
+    writeJson(path.join(artifactDir, "plan-compact.json"), planCompact),
+    writeJson(path.join(artifactDir, "plan-validation.json"), plan.machineCheck),
+    writeJson(path.join(artifactDir, "routing.json"), routing),
     writeJson(path.join(artifactDir, "request.json"), {
       request,
       workspaceContext: safeWorkspaceContext || null,
+      contradictions: compactContradictionInput,
+      previousPlanSummary: previousPlanSummary ?? null,
+      previousReviewSummary: previousReviewSummary ?? null,
+      routingContext: routingContext ?? null,
       requestedModel: call.requestedModel,
       resolvedModel: call.resolvedModel,
       fallbackNote: call.fallbackNote ?? null,
@@ -1113,6 +1921,7 @@ export async function runPlanningTool({ request, model, workspaceContext, contex
     lastPlanDir: artifactDir,
     lastGoal: plan.goal,
     lastRequest: request,
+    lastRoutingDir: artifactDir,
     updatedAt: new Date().toISOString(),
   }
   await writeSessionState(context.sessionID, nextState)
@@ -1123,10 +1932,13 @@ export async function runPlanningTool({ request, model, workspaceContext, contex
     fallbackNote: call.fallbackNote ?? null,
     summary: clipInlineText(plan.reasoningSummary || plan.workspaceSummary || plan.goal, 220),
     stepCount: plan.executionSteps.length,
+    routing: routing.summary,
   })
 
   return formatPlanResult({
     plan,
+    planCompact,
+    routing,
     geminiSessionId: nextState.geminiSessionId,
     artifactDir,
     fallbackNote: call.fallbackNote,
@@ -1140,16 +1952,59 @@ export async function runReviewTool({
   changedFiles = [],
   testsRun = [],
   openQuestions,
+  compactPlan,
+  contradictions = [],
+  routingContext,
   context,
 }) {
   const cwd = await workspaceRoot(context)
   const state = await readSessionState(context.sessionID)
-  const reviewPrompt = createReviewPrompt({
-    request,
+  const explicitCompactPlan = normalizeCompactPlanInput(compactPlan)
+  const priorPlan = state.lastPlanDir ? await readJsonIfExists(path.join(state.lastPlanDir, "plan.json")) : null
+  const priorPlanCompact = explicitCompactPlan ?? (state.lastPlanDir ? await readJsonIfExists(path.join(state.lastPlanDir, "plan-compact.json")) : null)
+  const priorReviewCompact = state.lastReviewDir
+    ? (await readJsonIfExists(path.join(state.lastReviewDir, "review-compact.json")))
+    : null
+  const priorContradictions =
+    contradictions.length > 0
+      ? compactContradictions(normalizeContradictionInput(contradictions))
+      : compactContradictions(
+          (state.lastReviewDir ? await readJsonIfExists(path.join(state.lastReviewDir, "contradictions.json")) : null) ?? [],
+        )
+  const routing =
+    (typeof routingContext === "string" && routingContext.trim()
+      ? {
+          summary: routingContext,
+          source: "tool-arg",
+        }
+      : null) ??
+    (state.lastPlanDir ? await readJsonIfExists(path.join(state.lastPlanDir, "routing.json")) : null) ??
+    computeRoutingDecision({
+      userPrompt: request,
+      plan: priorPlanCompact ?? priorPlan ?? { executionSteps: [], risks: [], assumptions: [] },
+      reviewHistory: priorReviewCompact ? [priorReviewCompact] : [],
+      contradictions: priorContradictions,
+      plannerModel: model,
+    })
+  const evidenceGraph = createLiveEvidenceGraph({
+    plan: priorPlan ?? priorPlanCompact ?? { goal: request, executionSteps: [] },
     implementationSummary,
     changedFiles,
     testsRun,
     openQuestions,
+    passNumber: Number(state.reviewCount || 0) + 1,
+    request,
+    geminiSessionId: state.geminiSessionId,
+  })
+  const evidenceCompact = compactEvidenceGraph(evidenceGraph)
+  const reviewPrompt = createReviewPrompt({
+    request,
+    compactPlan: priorPlanCompact ?? priorPlan ?? null,
+    compactEvidence: evidenceCompact,
+    testsRun,
+    openQuestions,
+    contradictions: priorContradictions,
+    routing,
     cwd,
   })
   const progress = createGeminiProgressReporter({
@@ -1175,6 +2030,36 @@ export async function runReviewTool({
     throw error
   }
   const review = extractReview(call.responseText)
+  const reviewCompact = compactReview(review)
+  const nextContradictions = buildContradictions({
+    review,
+    evidenceGraph,
+    passNumber: Number(state.reviewCount || 0) + 1,
+  })
+  const compactNextContradictions = compactContradictions(nextContradictions)
+  const history = await loadWorkspaceKnowledgeHistory(cwd)
+  const promotions = compilePromotions({
+    history,
+    prompt: request,
+    plan: priorPlan ?? priorPlanCompact ?? { goal: request, successCriteria: [] },
+    review,
+    evidenceGraph,
+    contradictions: nextContradictions,
+    routing,
+  })
+  const memoryTiers = buildMemoryTiers({
+    plan: priorPlan ?? priorPlanCompact ?? { goal: request, reasoningSummary: implementationSummary },
+    planCompact: priorPlanCompact ?? priorPlan ?? null,
+    review,
+    reviewCompact,
+    evidenceGraph,
+    evidenceCompact,
+    contradictions: compactNextContradictions,
+    promotions,
+    knowledge: await loadRelevantKnowledge({ prompt: request, cwd }),
+    routing,
+    artifacts: buildColdArtifactIndex(),
+  })
   const artifactDir = callDir(context.sessionID, "review")
 
   await Promise.all([
@@ -1183,12 +2068,26 @@ export async function runReviewTool({
     writeText(path.join(artifactDir, "review-stderr.log"), call.stderr),
     writeJson(path.join(artifactDir, "review-envelope.json"), call.envelope),
     writeJson(path.join(artifactDir, "review.json"), review),
+    writeJson(path.join(artifactDir, "review-compact.json"), reviewCompact),
+    writeJson(path.join(artifactDir, "evidence-graph.json"), evidenceGraph),
+    writeJson(path.join(artifactDir, "evidence-compact.json"), evidenceCompact),
+    writeJson(path.join(artifactDir, "contradictions.json"), nextContradictions),
+    writeJson(path.join(artifactDir, "contradictions-compact.json"), compactNextContradictions),
+    writeJson(path.join(artifactDir, "routing.json"), routing),
+    writeJson(path.join(artifactDir, "promotions.json"), promotions),
+    writeJson(path.join(artifactDir, "memory-hot.json"), memoryTiers.hot),
+    writeJson(path.join(artifactDir, "memory-warm.json"), memoryTiers.warm),
+    writeJson(path.join(artifactDir, "memory-cold.json"), memoryTiers.cold),
+    writeJson(path.join(artifactDir, "memory-learned.json"), memoryTiers.learned),
     writeJson(path.join(artifactDir, "request.json"), {
       request,
       implementationSummary,
       changedFiles,
       testsRun,
       openQuestions: openQuestions ?? null,
+      compactPlan: priorPlanCompact ?? null,
+      contradictions: priorContradictions,
+      routing,
       requestedModel: call.requestedModel,
       resolvedModel: call.resolvedModel,
       fallbackNote: call.fallbackNote ?? null,
@@ -1203,6 +2102,7 @@ export async function runReviewTool({
     reviewCount: Number(state.reviewCount || 0) + 1,
     lastReviewDir: artifactDir,
     lastReviewVerdict: review.verdict,
+    lastRoutingDir: artifactDir,
     updatedAt: new Date().toISOString(),
   }
   await writeSessionState(context.sessionID, nextState)
@@ -1215,6 +2115,8 @@ export async function runReviewTool({
     reasoningSummary: review.summary,
     plannerSessionId: nextState.geminiSessionId,
     workerStatus: review.verdict,
+    contradictionCount: nextContradictions.length,
+    promotedCount: promotions.promoted.length,
     createdAt: new Date().toISOString(),
     artifactDir,
   })
@@ -1226,10 +2128,17 @@ export async function runReviewTool({
     fallbackNote: call.fallbackNote ?? null,
     summary: clipInlineText(review.summary, 220),
     findingCount: review.findings.length,
+    contradictionCount: nextContradictions.length,
+    promotedCount: promotions.promoted.length,
   })
 
   return formatReviewResult({
     review,
+    reviewCompact,
+    evidenceCompact,
+    contradictions: compactNextContradictions,
+    promotions,
+    routing,
     geminiSessionId: nextState.geminiSessionId,
     artifactDir,
     fallbackNote: call.fallbackNote,

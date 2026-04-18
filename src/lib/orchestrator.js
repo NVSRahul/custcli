@@ -1,87 +1,86 @@
+import { buildContradictions, compactContradictions, scopePlanByContradictions } from "./contradiction.js"
+import { createEvidenceGraph, compactEvidenceGraph } from "./evidence.js"
 import { appendKnowledgeRecord, loadRelevantKnowledge } from "./knowledge.js"
 import { runOpencodeWorker } from "./opencode-adapter.js"
 import { compactPlan } from "./plan.js"
+import { compilePromotions, buildMemoryTiers, persistPromotions } from "./promotion.js"
 import { getReasoningAdapter } from "./reasoning-adapter.js"
 import { compactReview } from "./review.js"
+import { computeRoutingDecision } from "./router.js"
 import { createSessionStore } from "./session-store.js"
 
-const MAX_CORRECTION_LOOPS = 1
+const HARD_MAX_CORRECTION_LOOPS = 2
 
 function log(message, quiet) {
   if (!quiet) process.stderr.write(`${message}\n`)
 }
 
-function buildImplementationSummary({ worker, plan, passNumber }) {
-  const sections = [
-    `Execution pass: ${passNumber}`,
-    `Plan goal: ${plan.goal}`,
-    `Worker status: ${worker.status}`,
-    `Worker output summary: ${worker.finalText || "No worker text output was captured."}`,
-  ]
-
-  if (worker.changedFiles?.length) {
-    sections.push(`Changed files: ${worker.changedFiles.join(", ")}`)
-  }
-
-  if (worker.errors?.length) {
-    sections.push(`Worker errors: ${worker.errors.map((item) => JSON.stringify(item)).join("; ")}`)
-  }
-
-  return sections.join("\n")
+function flattenFindingSummaries(review) {
+  return Array.isArray(review?.findings) ? review.findings : []
 }
 
-function buildContradictions({ review, worker, passNumber }) {
-  const evidence = worker.finalText || `Worker status: ${worker.status}`
-  return [
-    ...review.findings.map((item) => ({
-      claim: item,
-      evidence,
-      source: "gemini-review:finding",
-      resolution: `pending-pass-${passNumber + 1}`,
-    })),
-    ...review.risks.map((item) => ({
-      claim: item,
-      evidence,
-      source: "gemini-review:risk",
-      resolution: `pending-pass-${passNumber + 1}`,
-    })),
-  ]
-}
-
-function buildReplanPrompt({ userPrompt, plan, review, contradictions, worker, passNumber }) {
-  const contradictionBlock =
+function buildReviewFocus({ passNumber, routing, contradictions, evidenceCompact }) {
+  const emphasis = routing?.reasoning?.reviewIntensity ?? "baseline"
+  const contradictionNote =
     contradictions.length === 0
-      ? "- None recorded"
-      : contradictions
-          .map(
-            (item, index) =>
-              `${index + 1}. claim=${item.claim}\n   evidence=${item.evidence}\n   source=${item.source}\n   resolution=${item.resolution}`,
-          )
-          .join("\n")
+      ? "No prior contradictions are open."
+      : `Resolve ${contradictions.length} open contradiction(s) before approving the run.`
 
+  return [
+    `Review pass ${passNumber}.`,
+    `Review intensity: ${emphasis}.`,
+    contradictionNote,
+    `Evidence summary: ${evidenceCompact?.summary ?? "No compact evidence was recorded."}`,
+  ].join(" ")
+}
+
+function buildScopedReplanPrompt({
+  userPrompt,
+  planCompact,
+  reviewCompact,
+  evidenceCompact,
+  contradictions,
+  scope,
+  routing,
+  passNumber,
+}) {
   return [
     userPrompt,
     "",
     `This is correction planning pass ${passNumber + 1}.`,
-    `Previous plan goal: ${plan.goal}`,
-    `Previous plan summary: ${plan.reasoningSummary}`,
-    `Latest worker summary: ${worker.finalText || "No worker output captured."}`,
-    `Latest review verdict: ${review.verdict}`,
-    `Latest review summary: ${review.summary}`,
+    "Use the structured contradiction packet below. Preserve unaffected steps unless there is a concrete reason to change them.",
     "",
-    "Reviewer findings:",
-    ...(review.findings.length ? review.findings.map((item) => `- ${item}`) : ["- None recorded"]),
+    "Routing context:",
+    JSON.stringify(routing, null, 2),
     "",
-    "Reviewer risks:",
-    ...(review.risks.length ? review.risks.map((item) => `- ${item}`) : ["- None recorded"]),
+    "Previous compact plan:",
+    JSON.stringify(planCompact, null, 2),
     "",
-    "Reviewer follow-up steps:",
-    ...(review.followUpSteps.length ? review.followUpSteps.map((item) => `- ${item}`) : ["- None recorded"]),
+    "Previous compact review:",
+    JSON.stringify(reviewCompact, null, 2),
     "",
-    "Concrete contradictions to resolve:",
-    contradictionBlock,
+    "Previous compact evidence graph:",
+    JSON.stringify(evidenceCompact, null, 2),
     "",
-    "Produce a corrected plan that resolves the reviewer concerns. Keep the plan minimal and directly executable.",
+    "Concrete contradictions:",
+    JSON.stringify(compactContradictions(contradictions), null, 2),
+    "",
+    "Scoped correction slice:",
+    JSON.stringify(
+      {
+        summary: scope.summary,
+        affectedSteps: scope.affectedSteps,
+        preservedSteps: scope.preservedSteps.map((step) => ({
+          id: step.id,
+          title: step.title,
+          writeScope: step.writeScope,
+        })),
+      },
+      null,
+      2,
+    ),
+    "",
+    "Return a corrected plan that focuses on contradicted slices, keeps context compact, and leaves preserved steps intact unless a dependency forces change.",
   ].join("\n")
 }
 
@@ -91,6 +90,44 @@ async function writePassArtifact(store, baseName, passNumber, value, writer = "w
   const ext = parsed?.[2] ?? ""
   await store[writer](baseName, value)
   await store[writer](`${stem}-pass-${passNumber}${ext}`, value)
+}
+
+function buildColdArtifactIndex() {
+  return {
+    raw: [
+      "planner-prompt.txt",
+      "planner-stdout.json",
+      "planner-stderr.log",
+      "planner-envelope.json",
+      "review-prompt.txt",
+      "review-stdout.json",
+      "review-stderr.log",
+      "review-envelope.json",
+      "worker-prompt.txt",
+      "worker-stdout.jsonl",
+      "worker-stderr.log",
+      "worker-events.json",
+    ],
+    structured: [
+      "request.json",
+      "summary.json",
+      "plan.json",
+      "plan-compact.json",
+      "plan-validation.json",
+      "review.json",
+      "review-compact.json",
+      "evidence-graph.json",
+      "evidence-compact.json",
+      "contradictions.json",
+      "review-history.json",
+      "routing.json",
+      "promotions.json",
+      "memory-hot.json",
+      "memory-warm.json",
+      "memory-cold.json",
+      "memory-learned.json",
+    ],
+  }
 }
 
 export async function runOrchestration({
@@ -139,7 +176,7 @@ export async function runOrchestration({
   })
 
   log(`Planning with ${reasoning.provider} in ${cwd}`, quiet)
-  const planner = await reasoning.runPlanner({
+  let planner = await reasoning.runPlanner({
     cwd,
     userPrompt,
     plannerModel,
@@ -147,7 +184,7 @@ export async function runOrchestration({
     plannerApprovalMode,
     knowledge,
   })
-  const plannerCompact = compactPlan(planner.plan)
+  let plannerCompact = compactPlan(planner.plan)
 
   await writePassArtifact(store, "planner-prompt.txt", 1, planner.prompt, "writeText")
   await writePassArtifact(store, "planner-stdout.json", 1, planner.stdout, "writeText")
@@ -155,23 +192,36 @@ export async function runOrchestration({
   await writePassArtifact(store, "planner-envelope.json", 1, planner.envelope)
   await writePassArtifact(store, "plan.json", 1, planner.plan)
   await writePassArtifact(store, "plan-compact.json", 1, plannerCompact)
+  await writePassArtifact(store, "plan-validation.json", 1, planner.plan.machineCheck)
+
+  let routing = computeRoutingDecision({
+    userPrompt,
+    plan: plannerCompact,
+    reviewHistory: [],
+    contradictions: [],
+    plannerModel,
+    workerModel,
+  })
+  await writePassArtifact(store, "routing.json", 1, routing)
 
   let worker
-  let finalPlanner = planner
-  let finalPlannerCompact = plannerCompact
   let finalReview
   let finalReviewCompact
+  let finalEvidenceGraph
+  let finalEvidenceCompact
+  let finalRouting = routing
   const reviewHistory = []
   const contradictions = []
+  const loopBudget = Math.min(HARD_MAX_CORRECTION_LOOPS, Math.max(0, routing.reasoning.loopBudget))
 
   if (!skipWorker) {
-    for (let passNumber = 1; passNumber <= MAX_CORRECTION_LOOPS + 1; passNumber += 1) {
+    for (let passNumber = 1; passNumber <= loopBudget + 1; passNumber += 1) {
       log(`Executing plan with OpenCode (pass ${passNumber})`, quiet)
       worker = await runOpencodeWorker({
         cwd,
         userPrompt,
-        plan: finalPlannerCompact,
-        plannerSessionId: finalPlanner.plannerSessionId,
+        plan: plannerCompact,
+        plannerSessionId: planner.plannerSessionId,
         workerModel,
         workerAgent,
         workerVariant,
@@ -183,27 +233,47 @@ export async function runOrchestration({
       await writePassArtifact(store, "worker-stderr.log", passNumber, worker.stderr, "writeText")
       await writePassArtifact(store, "worker-events.json", passNumber, worker.events)
 
-      log(`Reviewing execution with ${reasoning.provider} (pass ${passNumber})`, quiet)
-      const implementationSummary = buildImplementationSummary({
+      const evidenceGraph = createEvidenceGraph({
+        plan: planner.plan,
         worker,
-        plan: finalPlannerCompact,
         passNumber,
+        plannerSessionId: planner.plannerSessionId,
+        request: userPrompt,
       })
+      const evidenceCompact = compactEvidenceGraph(evidenceGraph)
+      finalEvidenceGraph = evidenceGraph
+      finalEvidenceCompact = evidenceCompact
+
+      await writePassArtifact(store, "evidence-graph.json", passNumber, evidenceGraph)
+      await writePassArtifact(store, "evidence-compact.json", passNumber, evidenceCompact)
+
+      finalRouting = computeRoutingDecision({
+        userPrompt,
+        plan: plannerCompact,
+        reviewHistory,
+        contradictions,
+        plannerModel,
+        workerModel,
+      })
+      await writePassArtifact(store, "routing.json", passNumber, finalRouting)
+
+      log(`Reviewing execution with ${reasoning.provider} (pass ${passNumber})`, quiet)
       const review = await reasoning.runReviewer({
         cwd,
         request: userPrompt,
-        implementationSummary,
-        changedFiles: worker.changedFiles ?? [],
+        compactPlan: plannerCompact,
+        compactEvidence: evidenceCompact,
         testsRun: [],
-        openQuestions:
-          passNumber === 1
-            ? "Review the initial implementation carefully."
-            : `This is review pass ${passNumber} after follow-up changes. Approve only if the prior contradictions are resolved.`,
-        contradictions,
-        planGoal: finalPlannerCompact.goal,
-        planSummary: finalPlannerCompact.reasoningSummary,
+        openQuestions: buildReviewFocus({
+          passNumber,
+          routing: finalRouting,
+          contradictions,
+          evidenceCompact,
+        }),
+        contradictions: compactContradictions(contradictions),
+        routing: finalRouting,
         plannerModel,
-        plannerSession: finalPlanner.plannerSessionId,
+        plannerSession: planner.plannerSessionId,
         plannerApprovalMode,
       })
 
@@ -218,45 +288,104 @@ export async function runOrchestration({
       await writePassArtifact(store, "review.json", passNumber, review.review)
       await writePassArtifact(store, "review-compact.json", passNumber, finalReviewCompact)
 
-      if (finalReviewCompact.verdict === "approved" || passNumber > MAX_CORRECTION_LOOPS) {
+      if (finalReviewCompact.verdict === "approved" || passNumber > loopBudget) {
         break
       }
 
       const nextContradictions = buildContradictions({
-        review: finalReviewCompact,
-        worker,
+        review: review.review,
+        evidenceGraph,
         passNumber,
       })
       contradictions.push(...nextContradictions)
       await store.writeJson("contradictions.json", contradictions)
       await store.writeJson(`contradictions-pass-${passNumber}.json`, nextContradictions)
 
-      log(`Re-planning after review feedback (pass ${passNumber + 1})`, quiet)
-      finalPlanner = await reasoning.runPlanner({
+      const scope = scopePlanByContradictions({
+        plan: planner.plan,
+        contradictions: nextContradictions,
+      })
+
+      log(`Re-planning after structured review feedback (pass ${passNumber + 1})`, quiet)
+      planner = await reasoning.runPlanner({
         cwd,
-        userPrompt: buildReplanPrompt({
+        userPrompt: buildScopedReplanPrompt({
           userPrompt,
-          plan: finalPlannerCompact,
-          review: finalReviewCompact,
+          planCompact: plannerCompact,
+          reviewCompact: finalReviewCompact,
+          evidenceCompact,
           contradictions: nextContradictions,
-          worker,
+          scope,
+          routing: finalRouting,
           passNumber,
         }),
         plannerModel,
-        plannerSession: review.plannerSessionId ?? finalPlanner.plannerSessionId,
+        plannerSession: review.plannerSessionId ?? planner.plannerSessionId,
         plannerApprovalMode,
         knowledge,
       })
-      finalPlannerCompact = compactPlan(finalPlanner.plan)
+      plannerCompact = compactPlan(planner.plan)
 
-      await writePassArtifact(store, "planner-prompt.txt", passNumber + 1, finalPlanner.prompt, "writeText")
-      await writePassArtifact(store, "planner-stdout.json", passNumber + 1, finalPlanner.stdout, "writeText")
-      await writePassArtifact(store, "planner-stderr.log", passNumber + 1, finalPlanner.stderr, "writeText")
-      await writePassArtifact(store, "planner-envelope.json", passNumber + 1, finalPlanner.envelope)
-      await writePassArtifact(store, "plan.json", passNumber + 1, finalPlanner.plan)
-      await writePassArtifact(store, "plan-compact.json", passNumber + 1, finalPlannerCompact)
+      await writePassArtifact(store, "planner-prompt.txt", passNumber + 1, planner.prompt, "writeText")
+      await writePassArtifact(store, "planner-stdout.json", passNumber + 1, planner.stdout, "writeText")
+      await writePassArtifact(store, "planner-stderr.log", passNumber + 1, planner.stderr, "writeText")
+      await writePassArtifact(store, "planner-envelope.json", passNumber + 1, planner.envelope)
+      await writePassArtifact(store, "plan.json", passNumber + 1, planner.plan)
+      await writePassArtifact(store, "plan-compact.json", passNumber + 1, plannerCompact)
+      await writePassArtifact(store, "plan-validation.json", passNumber + 1, planner.plan.machineCheck)
     }
   }
+
+  if (contradictions.length) {
+    await store.writeJson("contradictions.json", contradictions)
+  }
+  if (reviewHistory.length) {
+    await store.writeJson("review-history.json", reviewHistory)
+  }
+
+  const promotions = await compilePromotions({
+    rootDir: store.rootDir,
+    cwd,
+    prompt: userPrompt,
+    plan: planner.plan,
+    review: finalReview?.review ?? finalReviewCompact,
+    evidenceGraph: finalEvidenceGraph,
+    contradictions,
+    routing: finalRouting,
+  })
+  const promoted = await persistPromotions({
+    rootDir: store.rootDir,
+    cwd,
+    runId: store.runId,
+    promotions,
+  })
+
+  await store.writeJson("promotions.json", {
+    ...promotions,
+    promoted,
+  })
+
+  const memoryTiers = buildMemoryTiers({
+    plan: planner.plan,
+    planCompact: plannerCompact,
+    review: finalReview?.review ?? null,
+    reviewCompact: finalReviewCompact ?? null,
+    evidenceGraph: finalEvidenceGraph ?? null,
+    evidenceCompact: finalEvidenceCompact ?? null,
+    contradictions: compactContradictions(contradictions),
+    promotions: {
+      ...promotions,
+      promoted,
+    },
+    knowledge,
+    routing: finalRouting,
+    artifacts: buildColdArtifactIndex(),
+  })
+
+  await store.writeJson("memory-hot.json", memoryTiers.hot)
+  await store.writeJson("memory-warm.json", memoryTiers.warm)
+  await store.writeJson("memory-cold.json", memoryTiers.cold)
+  await store.writeJson("memory-learned.json", memoryTiers.learned)
 
   const summary = {
     runId: store.runId,
@@ -264,12 +393,32 @@ export async function runOrchestration({
     reasoningProvider: reasoning.provider,
     cwd,
     artifactDir: store.sessionDir,
-    plannerSessionId: finalPlanner.plannerSessionId,
-    plannerWarning: finalPlanner.fallbackNote ?? null,
-    goal: finalPlannerCompact.goal,
-    reasoningSummary: finalPlannerCompact.reasoningSummary,
+    plannerSessionId: planner.plannerSessionId,
+    plannerWarning: planner.fallbackNote ?? null,
+    goal: plannerCompact.goal,
+    reasoningSummary: plannerCompact.reasoningSummary,
     correctionLoopCount: Math.max(0, reviewHistory.length - 1),
     contradictionCount: contradictions.length,
+    routing: {
+      complexityScore: finalRouting.complexityScore,
+      reasoningIntensity: finalRouting.reasoning.intensity,
+      reviewIntensity: finalRouting.reasoning.reviewIntensity,
+      loopBudget: finalRouting.reasoning.loopBudget,
+    },
+    evidence: finalEvidenceCompact
+      ? {
+          summary: finalEvidenceCompact.summary,
+          verifiedStepCount: finalEvidenceCompact.verifiedStepCount,
+          partialStepCount: finalEvidenceCompact.partialStepCount,
+          missingStepCount: finalEvidenceCompact.missingStepCount,
+          blockedStepCount: finalEvidenceCompact.blockedStepCount,
+          changedFiles: finalEvidenceCompact.changedFiles,
+        }
+      : undefined,
+    promotions: {
+      candidateCount: promotions.candidates.length,
+      promotedCount: promoted.length,
+    },
     worker: worker
       ? {
           status: worker.status,
@@ -279,11 +428,12 @@ export async function runOrchestration({
           changedFiles: worker.changedFiles ?? [],
         }
       : undefined,
-    review: finalReview
+    review: finalReviewCompact
       ? {
           verdict: finalReviewCompact.verdict,
           summary: finalReviewCompact.summary,
-          findings: finalReviewCompact.findings,
+          findings: flattenFindingSummaries(finalReviewCompact),
+          findingDetails: finalReviewCompact.findingDetails ?? [],
           risks: finalReviewCompact.risks,
           followUpSteps: finalReviewCompact.followUpSteps,
         }
@@ -291,12 +441,6 @@ export async function runOrchestration({
   }
 
   await store.writeJson("summary.json", summary)
-  if (contradictions.length) {
-    await store.writeJson("contradictions.json", contradictions)
-  }
-  if (reviewHistory.length) {
-    await store.writeJson("review-history.json", reviewHistory)
-  }
 
   await appendKnowledgeRecord({
     rootDir: store.rootDir,
@@ -304,10 +448,15 @@ export async function runOrchestration({
       runId: store.runId,
       cwd,
       prompt: userPrompt,
-      goal: finalPlannerCompact.goal,
-      reasoningSummary: finalReviewCompact?.summary ?? finalPlannerCompact.reasoningSummary,
-      plannerSessionId: finalPlanner.plannerSessionId,
+      goal: plannerCompact.goal,
+      reasoningSummary: finalReviewCompact?.summary ?? plannerCompact.reasoningSummary,
+      plannerSessionId: planner.plannerSessionId,
       workerStatus: finalReviewCompact?.verdict ?? worker?.status ?? "skipped",
+      reviewVerdict: finalReviewCompact?.verdict ?? null,
+      contradictionCount: contradictions.length,
+      correctionLoopCount: Math.max(0, reviewHistory.length - 1),
+      planClaims: plannerCompact.planClaims,
+      promotedCount: promoted.length,
       createdAt: store.createdAt,
       artifactDir: store.sessionDir,
     },
@@ -316,7 +465,7 @@ export async function runOrchestration({
   log(`Artifacts saved to ${store.sessionDir}`, quiet)
   return {
     store,
-    planner: finalPlanner,
+    planner,
     worker,
     review: finalReview,
     summary,
